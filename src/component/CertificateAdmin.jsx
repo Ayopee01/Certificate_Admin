@@ -1,12 +1,38 @@
 // src/component/CertificateAdmin.jsx
 import React, { useEffect, useRef, useState } from "react";
-import axios from "axios";
+
 // PDF preview
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5050";
+// ===== API base from .env =====
+const API_URL = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+if (!API_URL) {
+  console.error("VITE_API_URL is missing. Set it in .env and restart Vite.");
+}
+
+// ===== tiny fetch helpers =====
+async function postJSON(path, payload) {
+  const res = await fetch(`${API_URL}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload ?? {}),
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function postForm(path, formData, { response = "json" } = {}) {
+  const res = await fetch(`${API_URL}${path}`, {
+    method: "POST",
+    body: formData,
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return response === "blob" ? res.blob() : res.json();
+}
 
 // ===== helpers =====
 const COLS = Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i)); // A..Z
@@ -18,17 +44,13 @@ function extractSheetId(input) {
     const url = new URL(trimmed);
     const m = url.pathname.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
     if (m) return m[1];
-  } catch (_) {
-    // not a URL -> maybe raw ID
-  }
-  if (/^[a-zA-Z0-9-_]{20,}$/.test(trimmed)) return trimmed; // looks like an ID
+  } catch (_) { /* not a URL */ }
+  if (/^[a-zA-Z0-9-_]{20,}$/.test(trimmed)) return trimmed;
   return "";
 }
 function buildRange({ sheetName, colMode, selectedCols, rowMode, rowStart, rowEnd }) {
   let start = "A", end = "Z";
-  if (colMode === "all") {
-    start = "A"; end = "Z";
-  } else if (colMode === "custom") {
+  if (colMode === "custom") {
     const idxs = (selectedCols || [])
       .map((c) => COLS.indexOf(c))
       .filter((i) => i >= 0)
@@ -36,16 +58,13 @@ function buildRange({ sheetName, colMode, selectedCols, rowMode, rowStart, rowEn
     if (idxs.length) { start = COLS[idxs[0]]; end = COLS[idxs[idxs.length - 1]]; }
   }
   const sName = (sheetName ? String(sheetName) : "Sheet1").trim() || "Sheet1";
-  if (rowMode === "all") {
-    // ทั้งหมดทุกแถว → ใช้รูปแบบคอลัมน์ล้วน เช่น Sheet1!A:Z
-    return `${sName}!${start}:${end}`;
-  }
+  if (rowMode === "all") return `${sName}!${start}:${end}`;
   const rs = Math.max(1, +rowStart || 1);
   const re = Math.max(rs, +rowEnd || rs);
   return `${sName}!${start}${rs}:${end}${re}`;
 }
 
-// Google Fonts we can auto-load for preview
+// Google Fonts for preview
 const FONT_PRESETS = [
   { key: "Sarabun", label: "Sarabun (TH)", css: "'Sarabun', sans-serif", gf: "Sarabun:wght@100..900" },
   { key: "Kanit", label: "Kanit (TH)", css: "'Kanit', sans-serif", gf: "Kanit:wght@100..900" },
@@ -69,21 +88,24 @@ function ensureGoogleFontLoaded(gf) {
 }
 
 export default function CertificateAdmin() {
+  // debug env (safe to remove)
+  useEffect(() => {
+    console.log("API_URL from .env =", API_URL);
+  }, []);
+
   // ====== Google Sheet ======
-  const [sheetLink, setSheetLink] = useState(""); // ใช้ลิงก์อย่างเดียว
+  const [sheetLink, setSheetLink] = useState("");
   const [sheetId, setSheetId] = useState("");
-  const [sheetTabs, setSheetTabs] = useState([]); // รายชื่อชีตจากลิงก์
+  const [sheetTabs, setSheetTabs] = useState([]);
   const [sheetName, setSheetName] = useState("");
 
-  // Range Builder (as requested)
+  // Range Builder
   const [colMode, setColMode] = useState("all"); // all | custom
   const [selectedCols, setSelectedCols] = useState(["A"]);
-
   const [rowMode, setRowMode] = useState("custom"); // all | custom
   const [rowStart, setRowStart] = useState(1);
   const [rowEnd, setRowEnd] = useState(1000);
-
-  const [range, setRange] = useState("Sheet1!A1:Z1000"); // internal only (ไม่แสดงแล้ว)
+  const [range, setRange] = useState("Sheet1!A1:Z1000"); // internal only
 
   // Preview result from backend
   const [preview, setPreview] = useState(null);
@@ -112,9 +134,10 @@ export default function CertificateAdmin() {
   // Position (relative 0..1)
   const [posRel, setPosRel] = useState({ x: 0.5, y: 0.5 });
 
-  // ===== derived =====
+  // derived
   const selectedPreset = FONT_PRESETS.find((f) => f.key === fontPresetKey) || FONT_PRESETS[0];
-  const effectiveCssFamily = selectedPreset.css === "__CUSTOM__" ? (customFontFamily || "sans-serif") : selectedPreset.css;
+  const effectiveCssFamily =
+    selectedPreset.css === "__CUSTOM__" ? (customFontFamily || "sans-serif") : selectedPreset.css;
 
   useEffect(() => {
     if (selectedPreset && selectedPreset.gf) ensureGoogleFontLoaded(selectedPreset.gf);
@@ -133,29 +156,21 @@ export default function CertificateAdmin() {
     );
   }, [sheetName, colMode, selectedCols, rowMode, rowStart, rowEnd]);
 
-  // เมื่อรายการแท็บเปลี่ยน: ให้เลือกแท็บแรกอัตโนมัติ หรือเคลียร์ชื่อชีตถ้ายังไม่ซิงค์
+  // auto-select first tab after sync
   useEffect(() => {
-    if (sheetTabs.length === 0) {
-      setSheetName("");
-    } else if (!sheetTabs.includes(sheetName)) {
-      setSheetName(sheetTabs[0]);
-    }
+    if (sheetTabs.length === 0) setSheetName("");
+    else if (!sheetTabs.includes(sheetName)) setSheetName(sheetTabs[0]);
   }, [sheetTabs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ===== handlers =====
-  function onSheetLinkChange(v) {
-    setSheetLink(v);
-  }
+  const onSheetLinkChange = (v) => setSheetLink(v);
 
   async function syncSheetTabs() {
     const id = extractSheetId(sheetLink);
     if (!id) { alert("โปรดวางลิงก์ Google Sheet ที่ถูกต้อง"); return; }
     setSheetId(id);
     try {
-      // ต้องมี backend route: POST /api/sheets/tabs { sheetId }
-      const res = await axios.post(`${API_URL}/api/sheets/tabs`, { sheetId: id });
-      // รองรับได้ทั้งรูปแบบ {tabs:["Sheet1","Sheet2"]} หรือ {sheets:[{title:"Sheet1"},...]}
-      const data = res.data || {};
+      const data = await postJSON(`/api/sheets/tabs`, { sheetId: id });
       let tabs = [];
       if (Array.isArray(data.tabs)) tabs = data.tabs;
       else if (Array.isArray(data.sheets)) tabs = data.sheets.map((s) => s && s.title).filter(Boolean);
@@ -174,10 +189,10 @@ export default function CertificateAdmin() {
     if (!id) { alert("โปรดวางลิงก์หรือ ID ของ Google Sheet ให้ถูกต้อง"); return; }
     setSheetId(id);
     try {
-      const res = await axios.post(`${API_URL}/api/sheets/preview`, { sheetId: id, range });
-      setPreview(res.data);
-      if (res.data && Array.isArray(res.data.headers) && res.data.headers.length) {
-        const defaultCol = res.data.headers.indexOf("full_name") >= 0 ? "full_name" : res.data.headers[0];
+      const data = await postJSON(`/api/sheets/preview`, { sheetId: id, range });
+      setPreview(data);
+      if (data && Array.isArray(data.headers) && data.headers.length) {
+        const defaultCol = data.headers.indexOf("full_name") >= 0 ? "full_name" : data.headers[0];
         setNameColumn(defaultCol);
       }
     } catch (err) {
@@ -186,8 +201,57 @@ export default function CertificateAdmin() {
     }
   }
 
+  async function handleGenerate() {
+    const id = sheetId || extractSheetId(sheetLink);
+    if (!id) { alert("กรุณาใส่ลิงก์ของ Google Sheet ให้ถูกต้อง"); return; }
+    if (!templateFile) { alert("กรุณาอัปโหลดเทมเพลต (ภาพหรือ PDF)"); return; }
+
+    const form = new FormData();
+    form.append("template", templateFile);
+    form.append("sheetId", id);
+    form.append("range", range);
+    form.append("nameColumn", nameColumn);
+    form.append("outputFormat", outputFormat);
+
+    const effectiveMode =
+      mode === "auto" ? (templateFile.type === "application/pdf" ? "pdf" : "image") : mode;
+    form.append("mode", effectiveMode);
+
+    // position
+    form.append("xRel", String(posRel.x));
+    form.append("yRel", String(posRel.y));
+    form.append("useRelative", "true");
+    form.append("fromTop", "true");
+
+    // font & style
+    form.append("fontFamily", effectiveCssFamily);
+    form.append("fontWeight", String(fontWeight));
+    form.append("letterSpacing", String(letterSpacing));
+    if (selectedPreset.key === "Custom" && customFontFile) {
+      form.append("fontFile", customFontFile, customFontFile.name);
+    }
+
+    form.append("fontSize", String(fontSize));
+    form.append("color", color);
+    form.append("pageIndex", String(pageIndex));
+    form.append("filenamePrefix", filenamePrefix);
+
+    try {
+      const blob = await postForm(`/api/generate`, form, { response: "blob" });
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = `certificates_${Date.now()}.zip`;
+      a.click();
+      URL.revokeObjectURL(blobUrl);
+    } catch (err) {
+      console.error(err);
+      alert("สร้างไฟล์ไม่สำเร็จ ตรวจสอบรูปแบบและสิทธิ์ไฟล์อีกครั้ง");
+    }
+  }
+
   function handleTemplateChange(e) {
-    const files = e && e.target && e.target.files ? e.target.files : [];
+    const files = e?.target?.files || [];
     const f = files[0] || null;
     setTemplateFile(f);
     if (!f) { setPreviewUrl(""); setMode("auto"); return; }
@@ -239,7 +303,7 @@ export default function CertificateAdmin() {
   }
 
   function handleCustomFontUpload(e) {
-    const files = e && e.target && e.target.files ? e.target.files : [];
+    const files = e?.target?.files || [];
     const f = files[0] || null;
     setCustomFontFile(f);
     if (!f) { setCustomFontFamily(""); return; }
@@ -250,55 +314,6 @@ export default function CertificateAdmin() {
     styleEl.innerHTML = `@font-face { font-family: '${family}'; src: url('${url}'); font-display: swap; }`;
     document.head.appendChild(styleEl);
     setCustomFontFamily(family);
-  }
-
-  async function handleGenerate() {
-    const id = sheetId || extractSheetId(sheetLink);
-    if (!id) { alert("กรุณาใส่ลิงก์ของ Google Sheet ให้ถูกต้อง"); return; }
-    if (!templateFile) { alert("กรุณาอัปโหลดเทมเพลต (ภาพหรือ PDF)"); return; }
-
-    const form = new FormData();
-    form.append("template", templateFile);
-    form.append("sheetId", id);
-    form.append("range", range);
-    form.append("nameColumn", nameColumn);
-    form.append("outputFormat", outputFormat);
-
-    const effectiveMode = mode === "auto" ? (templateFile.type === "application/pdf" ? "pdf" : "image") : mode;
-    form.append("mode", effectiveMode);
-
-    // position
-    form.append("xRel", String(posRel.x));
-    form.append("yRel", String(posRel.y));
-    form.append("useRelative", "true");
-    form.append("fromTop", "true");
-
-    // font & style
-    const effFamily = effectiveCssFamily;
-    form.append("fontFamily", effFamily);
-    form.append("fontWeight", String(fontWeight));
-    form.append("letterSpacing", String(letterSpacing));
-    if (selectedPreset.key === "Custom" && customFontFile) {
-      form.append("fontFile", customFontFile, customFontFile.name);
-    }
-
-    form.append("fontSize", String(fontSize));
-    form.append("color", color);
-    form.append("pageIndex", String(pageIndex));
-    form.append("filenamePrefix", filenamePrefix);
-
-    try {
-      const res = await axios.post(`${API_URL}/api/generate`, form, { responseType: "blob" });
-      const blobUrl = URL.createObjectURL(res.data);
-      const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `certificates_${Date.now()}.zip`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch (err) {
-      console.error(err);
-      alert("สร้างไฟล์ไม่สำเร็จ ตรวจสอบรูปแบบและสิทธิ์ไฟล์อีกครั้ง");
-    }
   }
 
   function resetMarkerCenter() {
@@ -323,7 +338,6 @@ export default function CertificateAdmin() {
       <section className="rounded-xl border bg-white p-4 md:p-6 shadow-sm">
         <h2 className="font-semibold text-slate-800 mb-4">Google Sheet</h2>
 
-        {/* Sheet link + sync */}
         <div className="grid md:grid-cols-3 gap-4 items-end">
           <FieldText
             label="Sheet Link"
@@ -341,7 +355,7 @@ export default function CertificateAdmin() {
             </button>
           </div>
 
-          {/* ชื่อชีตเป็น select จากแท็บที่ซิงค์เท่านั้น */}
+          {/* sheet tab */}
           <div className="md:col-span-1">
             <label className="block text-sm text-slate-600 mb-1">ชื่อชีต (Sheet Tab)</label>
             <select
@@ -422,8 +436,6 @@ export default function CertificateAdmin() {
               )}
             </div>
           )}
-
-          {/* NOTE: ไม่แสดง Range (A1) แล้ว ตามคำขอ */}
         </div>
 
         {/* Preview Sheet */}
@@ -577,7 +589,7 @@ export default function CertificateAdmin() {
   );
 }
 
-// ===== Reusable small fields =====
+// ===== Small fields =====
 function FieldText({ label, value, onChange, placeholder, readOnly }) {
   return (
     <div>
@@ -601,11 +613,10 @@ function FieldNumber({ label, value, onChange }) {
   );
 }
 
-/** Marker overlay ที่ลากได้บนรูป/canvas */
+/** Draggable overlay */
 function MarkerOverlay({ parentRef, posRel, onDrag, sampleText, color, fontSize, fontFamily, fontWeight, letterSpacing }) {
   const markerRef = useRef(null);
 
-  // helper: clamp and move
   function moveBy(dxRel, dyRel) {
     const nx = clamp01(posRel.x + dxRel);
     const ny = clamp01(posRel.y + dyRel);
@@ -640,8 +651,7 @@ function MarkerOverlay({ parentRef, posRel, onDrag, sampleText, color, fontSize,
   function onKeyDown(ev) {
     const host = parentRef.current; if (!host) return;
     const rect = host.getBoundingClientRect();
-    // step in px -> convert to rel
-    const basePx = ev.shiftKey ? 10 : ev.altKey ? 0.5 : 1; // Shift=10px, Alt=0.5px, default=1px
+    const basePx = ev.shiftKey ? 10 : ev.altKey ? 0.5 : 1;
     const dxRel = basePx / rect.width;
     const dyRel = basePx / rect.height;
     let handled = true;
@@ -655,7 +665,6 @@ function MarkerOverlay({ parentRef, posRel, onDrag, sampleText, color, fontSize,
     if (handled) ev.preventDefault();
   }
 
-  // guide highlights
   const nearCX = Math.abs(posRel.x - 0.5) <= 0.01;
   const nearCY = Math.abs(posRel.y - 0.5) <= 0.01;
   const nearL = posRel.x <= 0.01;
@@ -674,19 +683,15 @@ function MarkerOverlay({ parentRef, posRel, onDrag, sampleText, color, fontSize,
 
   return (
     <>
-      {/* guidelines */}
       <div className="pointer-events-none absolute inset-0 select-none">
-        {/* center lines */}
         <div className={`absolute left-1/2 top-0 bottom-0 w-px ${nearCX ? 'bg-emerald-500' : 'bg-black/20'}`} />
         <div className={`absolute top-1/2 left-0 right-0 h-px ${nearCY ? 'bg-emerald-500' : 'bg-black/20'}`} />
-        {/* frame lines */}
         <div className={`absolute left-0 top-0 bottom-0 w-px ${nearL ? 'bg-emerald-500' : 'bg-black/10'}`} />
         <div className={`absolute right-0 top-0 bottom-0 w-px ${nearR ? 'bg-emerald-500' : 'bg-black/10'}`} />
         <div className={`absolute top-0 left-0 right-0 h-px ${nearT ? 'bg-emerald-500' : 'bg-black/10'}`} />
         <div className={`absolute bottom-0 left-0 right-0 h-px ${nearB ? 'bg-emerald-500' : 'bg-black/10'}`} />
       </div>
 
-      {/* draggable marker */}
       <div
         ref={markerRef}
         tabIndex={0}
@@ -695,15 +700,12 @@ function MarkerOverlay({ parentRef, posRel, onDrag, sampleText, color, fontSize,
         style={style}
         title="ลากหรือใช้ปุ่มลูกศรเพื่อย้าย (Shift=10px, Alt=0.5px)"
       >
-        {/* ตัวหนังสือล้วน ไม่มีพื้นหลัง */}
         <div
           className="rounded text-xs px-2 py-1"
           style={{ color: color, background: "transparent", fontSize: `${Math.max(12, fontSize)}px` }}
         >
           {sampleText}
         </div>
-
-        {/* จุดจับตำแหน่ง (สีคงที่เพื่อไม่สับสนกับสีตัวอักษร) */}
         <div className="mx-auto mt-1 h-2 w-2 rounded-full bg-emerald-500" />
       </div>
     </>
