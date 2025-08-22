@@ -118,6 +118,7 @@ export default function CertificateAdmin() {
   const imgRef = useRef(null);
   const pdfCanvasRef = useRef(null);
   const [pdfSize, setPdfSize] = useState({ width: 1, height: 1 });
+  const [imgNatural, setImgNatural] = useState({ width: 1, height: 1 }); // ขนาดจริงของรูป
 
   // ====== Name/Text settings ======
   const [nameColumn, setNameColumn] = useState("full_name");
@@ -285,7 +286,8 @@ export default function CertificateAdmin() {
 
   useEffect(() => {
     if (templateFile && mode === "pdf") renderPdfFirstPage(templateFile);
-  }, [pageIndex]); // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageIndex]);
 
   function onClickImage(e) {
     if (!imgRef.current) return;
@@ -319,6 +321,33 @@ export default function CertificateAdmin() {
   function resetMarkerCenter() {
     setPosRel({ x: 0.5, y: 0.5 });
   }
+
+  // ---- preview scale: ให้ขนาดตัวอย่างสเกลตรงกับต้นฉบับจริง ----
+  function usePreviewScale() {
+    const [scale, setScale] = useState(1);
+    useEffect(() => {
+      function update() {
+        if (mode === "image" && imgRef.current) {
+          const el = imgRef.current;
+          const srcW = imgNatural.width || el.naturalWidth || 1;
+          const dispW = el.clientWidth || el.width || 1;
+          setScale(dispW / srcW);
+        } else if (mode === "pdf" && pdfCanvasRef.current) {
+          const cv = pdfCanvasRef.current;
+          const srcW = cv.width || 1;
+          const dispW = cv.clientWidth || 1;
+          setScale(dispW / srcW);
+        } else {
+          setScale(1);
+        }
+      }
+      update();
+      window.addEventListener("resize", update);
+      return () => window.removeEventListener("resize", update);
+    }, [mode, previewUrl, imgNatural, pdfSize]);
+    return scale;
+  }
+  const previewScale = usePreviewScale();
 
   // ===== UI =====
   return (
@@ -471,7 +500,12 @@ export default function CertificateAdmin() {
           <h2 className="font-semibold text-slate-800">Template</h2>
           <div className="text-xs text-slate-500">โหมด: <span className="font-medium">{mode}</span></div>
         </div>
-        <input type="file" accept="image/*,application/pdf" onChange={handleTemplateChange} className="block w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-white file:font-medium hover:file:bg-black" />
+        <input
+          type="file"
+          accept="image/*,application/pdf"
+          onChange={handleTemplateChange}
+          className="block w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-white file:font-medium hover:file:bg-black"
+        />
 
         {mode === "image" && previewUrl && (
           <div className="mt-4 rounded-lg border bg-slate-50 p-3 overflow-auto relative">
@@ -482,6 +516,10 @@ export default function CertificateAdmin() {
                 alt="template"
                 className="max-w-full h-auto rounded shadow cursor-crosshair select-none"
                 onClick={onClickImage}
+                onLoad={(e) => {
+                  const im = e.currentTarget;
+                  setImgNatural({ width: im.naturalWidth || 1, height: im.naturalHeight || 1 });
+                }}
               />
               <MarkerOverlay
                 parentRef={imgRef}
@@ -493,6 +531,7 @@ export default function CertificateAdmin() {
                 fontFamily={effectiveCssFamily}
                 fontWeight={fontWeight}
                 letterSpacing={letterSpacing}
+                scale={previewScale}
               />
             </div>
           </div>
@@ -502,12 +541,24 @@ export default function CertificateAdmin() {
           <div className="mt-4 space-y-3">
             <div className="flex items-center gap-3">
               <label className="text-sm text-slate-600">Page Index</label>
-              <input type="number" min={0} value={pageIndex} onChange={(e) => setPageIndex(+e.target.value)} className="w-24 rounded-md border-slate-300 focus:border-emerald-500 focus:ring-emerald-500" />
-              <button type="button" onClick={resetMarkerCenter} className="text-xs px-3 py-1 rounded border bg-white hover:bg-slate-100">รีเซ็ตตำแหน่งตัวอย่าง</button>
+              <input
+                type="number"
+                min={0}
+                value={pageIndex}
+                onChange={(e) => setPageIndex(+e.target.value)}
+                className="w-24 rounded-md border-slate-300 focus:border-emerald-500 focus:ring-emerald-500"
+              />
+              <button type="button" onClick={resetMarkerCenter} className="text-xs px-3 py-1 rounded border bg-white hover:bg-slate-100">
+                รีเซ็ตตำแหน่งตัวอย่าง
+              </button>
             </div>
             <div className="rounded-lg border bg-slate-50 p-3 overflow-auto relative">
               <div className="relative inline-block">
-                <canvas ref={pdfCanvasRef} className="rounded shadow cursor-crosshair select-none" onClick={onClickPdf} />
+                <canvas
+                  ref={pdfCanvasRef}
+                  className="rounded shadow cursor-crosshair select-none"
+                  onClick={onClickPdf}
+                />
                 <MarkerOverlay
                   parentRef={pdfCanvasRef}
                   posRel={posRel}
@@ -518,10 +569,13 @@ export default function CertificateAdmin() {
                   fontFamily={effectiveCssFamily}
                   fontWeight={fontWeight}
                   letterSpacing={letterSpacing}
+                  scale={previewScale}
                 />
               </div>
             </div>
-            <p className="text-xs text-slate-500">พิกัดที่เลือกเป็นสัดส่วน (0..1) เทียบกับขนาดหน้า PDF — Backend จะคำนวณพิกัดจริงให้อัตโนมัติ</p>
+            <p className="text-xs text-slate-500">
+              พิกัดที่เลือกเป็นสัดส่วน (0..1) เทียบกับขนาดหน้า PDF — Backend จะคำนวณพิกัดจริงให้อัตโนมัติ
+            </p>
           </div>
         )}
       </section>
@@ -565,7 +619,13 @@ export default function CertificateAdmin() {
             <FieldNumber label="Weight (100-900)" value={fontWeight} onChange={setFontWeight} />
             <div>
               <label className="block text-sm text-slate-600 mb-1">Letter Spacing (px)</label>
-              <input type="number" step="0.5" value={letterSpacing} onChange={(e) => setLetterSpacing(parseFloat(e.target.value || 0))} className="w-full rounded-md border-slate-300 focus:border-emerald-500 focus:ring-emerald-500" />
+              <input
+                type="number"
+                step="0.5"
+                value={letterSpacing}
+                onChange={(e) => setLetterSpacing(parseFloat(e.target.value || 0))}
+                className="w-full rounded-md border-slate-300 focus:border-emerald-500 focus:ring-emerald-500"
+              />
             </div>
           </div>
 
@@ -582,7 +642,9 @@ export default function CertificateAdmin() {
         </div>
 
         <div className="mt-4">
-          <button type="button" onClick={resetMarkerCenter} className="text-xs px-3 py-1 rounded border bg-white hover:bg-slate-100">รีเซ็ตตำแหน่งตัวอย่างให้อยู่กลาง</button>
+          <button type="button" onClick={resetMarkerCenter} className="text-xs px-3 py-1 rounded border bg-white hover:bg-slate-100">
+            รีเซ็ตตำแหน่งตัวอย่างให้อยู่กลาง
+          </button>
         </div>
       </section>
     </div>
@@ -613,8 +675,19 @@ function FieldNumber({ label, value, onChange }) {
   );
 }
 
-/** Draggable overlay */
-function MarkerOverlay({ parentRef, posRel, onDrag, sampleText, color, fontSize, fontFamily, fontWeight, letterSpacing }) {
+/** Draggable overlay (scaled preview) */
+function MarkerOverlay({
+  parentRef,
+  posRel,
+  onDrag,
+  sampleText,
+  color,
+  fontSize,
+  fontFamily,
+  fontWeight,
+  letterSpacing,
+  scale = 1, // สเกลของพรีวิวบนจอ
+}) {
   const markerRef = useRef(null);
 
   function moveBy(dxRel, dyRel) {
@@ -678,11 +751,12 @@ function MarkerOverlay({ parentRef, posRel, onDrag, sampleText, color, fontSize,
     transform: `translate(-50%, -50%)`,
     fontFamily: fontFamily,
     fontWeight: fontWeight,
-    letterSpacing: `${letterSpacing}px`,
+    letterSpacing: `${letterSpacing * scale}px`, // scale letterSpacing
   };
 
   return (
     <>
+      {/* guidelines */}
       <div className="pointer-events-none absolute inset-0 select-none">
         <div className={`absolute left-1/2 top-0 bottom-0 w-px ${nearCX ? 'bg-emerald-500' : 'bg-black/20'}`} />
         <div className={`absolute top-1/2 left-0 right-0 h-px ${nearCY ? 'bg-emerald-500' : 'bg-black/20'}`} />
@@ -692,6 +766,7 @@ function MarkerOverlay({ parentRef, posRel, onDrag, sampleText, color, fontSize,
         <div className={`absolute bottom-0 left-0 right-0 h-px ${nearB ? 'bg-emerald-500' : 'bg-black/10'}`} />
       </div>
 
+      {/* draggable marker */}
       <div
         ref={markerRef}
         tabIndex={0}
@@ -700,12 +775,19 @@ function MarkerOverlay({ parentRef, posRel, onDrag, sampleText, color, fontSize,
         style={style}
         title="ลากหรือใช้ปุ่มลูกศรเพื่อย้าย (Shift=10px, Alt=0.5px)"
       >
+        {/* ตัวหนังสือล้วน (สเกลเท่าจริง) */}
         <div
           className="rounded text-xs px-2 py-1"
-          style={{ color: color, background: "transparent", fontSize: `${Math.max(12, fontSize)}px` }}
+          style={{
+            color: color,
+            background: "transparent",
+            fontSize: `${Math.max(1, fontSize * scale)}px`, // scale font size
+          }}
         >
           {sampleText}
         </div>
+
+        {/* จุดจับตำแหน่ง (ไม่ต้องสเกล เพื่อมองเห็นง่าย) */}
         <div className="mx-auto mt-1 h-2 w-2 rounded-full bg-emerald-500" />
       </div>
     </>

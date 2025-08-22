@@ -8,7 +8,7 @@ export default function Sidebar() {
       <div className="px-4 py-4 border-b border-white/10">
         <div className="flex items-center gap-2">
           <div className="h-8 w-8 rounded-lg bg-emerald-500/20 grid place-content-center">
-            <span className="text-emerald-400 font-bold">C</span>
+            <span className="text-emerald-400 font-bold">A</span>
           </div>
           <div className="font-semibold tracking-wide">Admin Panel</div>
         </div>
@@ -23,7 +23,7 @@ export default function Sidebar() {
 
       {/* Footer small */}
       <div className="mt-auto hidden md:block px-4 py-3 text-[11px] text-slate-400/80">
-        v1.0 • Tailwind UI
+        v1.0 • By Ayopee
       </div>
     </aside>
   );
