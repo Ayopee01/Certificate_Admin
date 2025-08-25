@@ -8,9 +8,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
 // ===== API base from .env =====
 const API_URL = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
-if (!API_URL) {
-  console.error("VITE_API_URL is missing. Set it in .env and restart Vite.");
-}
+if (!API_URL) console.error("VITE_API_URL is missing. Set it in .env and restart Vite.");
 
 // ===== tiny fetch helpers =====
 async function postJSON(path, payload) {
@@ -23,7 +21,6 @@ async function postJSON(path, payload) {
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
-
 async function postForm(path, formData, { response = "json" } = {}) {
   const res = await fetch(`${API_URL}${path}`, {
     method: "POST",
@@ -44,7 +41,7 @@ function extractSheetId(input) {
     const url = new URL(trimmed);
     const m = url.pathname.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
     if (m) return m[1];
-  } catch (_) { /* not a URL */ }
+  } catch (_) {}
   if (/^[a-zA-Z0-9-_]{20,}$/.test(trimmed)) return trimmed;
   return "";
 }
@@ -63,36 +60,59 @@ function buildRange({ sheetName, colMode, selectedCols, rowMode, rowStart, rowEn
   const re = Math.max(rs, +rowEnd || rs);
   return `${sName}!${start}${rs}:${end}${re}`;
 }
+// ชื่อจริงจากแถว + ตั้งชื่อไฟล์
+function getNameFromRow(row, preview, nameColumn) {
+  if (!row) return "";
+  if (Array.isArray(row)) {
+    const idx = (preview?.headers || []).indexOf(nameColumn);
+    return idx >= 0 ? (row[idx] ?? "") : (row[0] ?? "");
+  }
+  if (row && typeof row === "object") {
+    if (nameColumn in row) return row[nameColumn] ?? "";
+    const keys = Object.keys(row);
+    return row[keys[0]] ?? "";
+  }
+  return String(row);
+}
+function safeSlug(s) {
+  return String(s || "")
+    .normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ").trim()
+    .replace(/[\/\\:*?"<>|]/g, "-");
+}
 
-// Google Fonts for preview
+// Google Fonts รายการเลือก
 const FONT_PRESETS = [
   { key: "Sarabun", label: "Sarabun (TH)", css: "'Sarabun', sans-serif", gf: "Sarabun:wght@100..900" },
   { key: "Kanit", label: "Kanit (TH)", css: "'Kanit', sans-serif", gf: "Kanit:wght@100..900" },
   { key: "Prompt", label: "Prompt (TH)", css: "'Prompt', sans-serif", gf: "Prompt:wght@100..900" },
   { key: "NotoSansThai", label: "Noto Sans Thai", css: "'Noto Sans Thai', sans-serif", gf: "Noto+Sans+Thai:wght@100..900" },
   { key: "Mitr", label: "Mitr (TH)", css: "'Mitr', sans-serif", gf: "Mitr:wght@200..900" },
-  { key: "Sriracha", label: "Sriracha (TH Handwriting)", css: "'Sriracha', cursive", gf: "Sriracha" },
+  { key: "Sriracha", label: "Sriracha", css: "'Sriracha', cursive", gf: "Sriracha" },
   { key: "Inter", label: "Inter", css: "'Inter', system-ui, sans-serif", gf: "Inter:wght@100..900" },
   { key: "Times", label: "Times New Roman", css: "'Times New Roman', serif", gf: null },
-  { key: "Custom", label: "Custom (อัปโหลด .ttf/.otf)", css: "__CUSTOM__", gf: null },
+  { key: "Custom", label: "Custom (.ttf/.otf)", css: "__CUSTOM__", gf: null },
 ];
 function ensureGoogleFontLoaded(gf) {
   if (!gf) return;
   const id = `gf-${gf}`;
   if (document.getElementById(id)) return;
   const link = document.createElement("link");
-  link.id = id;
-  link.rel = "stylesheet";
+  link.id = id; link.rel = "stylesheet";
   link.href = `https://fonts.googleapis.com/css2?family=${gf}&display=swap`;
   document.head.appendChild(link);
 }
 
-export default function CertificateAdmin() {
-  // debug env (safe to remove)
+// Debounce hook
+function useDebouncedEffect(effect, deps, delay = 350) {
   useEffect(() => {
-    console.log("API_URL from .env =", API_URL);
-  }, []);
+    const h = setTimeout(() => { effect(); }, delay);
+    return () => clearTimeout(h);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [...deps, delay]);
+}
 
+export default function CertificateAdmin() {
   // ====== Google Sheet ======
   const [sheetLink, setSheetLink] = useState("");
   const [sheetId, setSheetId] = useState("");
@@ -100,17 +120,22 @@ export default function CertificateAdmin() {
   const [sheetName, setSheetName] = useState("");
 
   // Range Builder
-  const [colMode, setColMode] = useState("all"); // all | custom
+  const [colMode, setColMode] = useState("all");
   const [selectedCols, setSelectedCols] = useState(["A"]);
-  const [rowMode, setRowMode] = useState("custom"); // all | custom
+  const [rowMode, setRowMode] = useState("custom");
   const [rowStart, setRowStart] = useState(1);
   const [rowEnd, setRowEnd] = useState(1000);
-  const [range, setRange] = useState("Sheet1!A1:Z1000"); // internal only
+  const [range, setRange] = useState("Sheet1!A1:Z1000");
 
-  // Preview result from backend
+  // ข้อมูล preview sheet
   const [preview, setPreview] = useState(null);
+  const [records, setRecords] = useState([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [page, setPage] = useState(0);
+  const pageSize = 24;
+  const total = records.length;
 
-  // ====== Template & Preview ======
+  // Template & preview (local)
   const [templateFile, setTemplateFile] = useState(null);
   const [mode, setMode] = useState("auto"); // auto|image|pdf
   const [pageIndex, setPageIndex] = useState(0);
@@ -118,9 +143,9 @@ export default function CertificateAdmin() {
   const imgRef = useRef(null);
   const pdfCanvasRef = useRef(null);
   const [pdfSize, setPdfSize] = useState({ width: 1, height: 1 });
-  const [imgNatural, setImgNatural] = useState({ width: 1, height: 1 }); // ขนาดจริงของรูป
+  const [imgNatural, setImgNatural] = useState({ width: 1, height: 1 });
 
-  // ====== Name/Text settings ======
+  // Text settings
   const [nameColumn, setNameColumn] = useState("full_name");
   const [outputFormat, setOutputFormat] = useState("pdf");
   const [filenamePrefix, setFilenamePrefix] = useState("CERT_");
@@ -132,81 +157,75 @@ export default function CertificateAdmin() {
   const [customFontFile, setCustomFontFile] = useState(null);
   const [customFontFamily, setCustomFontFamily] = useState("");
 
-  // Position (relative 0..1)
+  // Position (rel)
   const [posRel, setPosRel] = useState({ x: 0.5, y: 0.5 });
 
-  // derived
+  // แสดงพรีวิวแบบไหน
+  const [previewTab, setPreviewTab] = useState("server"); // 'server' | 'client'
+
+  // Server-render preview
+  const [srvUrl, setSrvUrl] = useState("");
+  const [srvLoading, setSrvLoading] = useState(false);
+  const [srvError, setSrvError] = useState("");
+  const srvImgRef = useRef(null); // <<<<<< เพิ่ม ref รูปพรีวิวจาก backend
+
   const selectedPreset = FONT_PRESETS.find((f) => f.key === fontPresetKey) || FONT_PRESETS[0];
-  const effectiveCssFamily =
-    selectedPreset.css === "__CUSTOM__" ? (customFontFamily || "sans-serif") : selectedPreset.css;
+  const effectiveCssFamily = selectedPreset.css === "__CUSTOM__" ? (customFontFamily || "sans-serif") : selectedPreset.css;
+
+  useEffect(() => { if (selectedPreset.gf) ensureGoogleFontLoaded(selectedPreset.gf); }, [fontPresetKey]);
 
   useEffect(() => {
-    if (selectedPreset && selectedPreset.gf) ensureGoogleFontLoaded(selectedPreset.gf);
-  }, [fontPresetKey]);
-
-  useEffect(() => {
-    setRange(
-      buildRange({
-        sheetName: sheetName || "Sheet1",
-        colMode,
-        selectedCols,
-        rowMode,
-        rowStart,
-        rowEnd,
-      })
-    );
+    setRange(buildRange({ sheetName: sheetName || "Sheet1", colMode, selectedCols, rowMode, rowStart, rowEnd }));
   }, [sheetName, colMode, selectedCols, rowMode, rowStart, rowEnd]);
 
-  // auto-select first tab after sync
   useEffect(() => {
     if (sheetTabs.length === 0) setSheetName("");
     else if (!sheetTabs.includes(sheetName)) setSheetName(sheetTabs[0]);
-  }, [sheetTabs]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sheetTabs]); // eslint-disable-line
 
-  // ===== handlers =====
   const onSheetLinkChange = (v) => setSheetLink(v);
 
   async function syncSheetTabs() {
     const id = extractSheetId(sheetLink);
-    if (!id) { alert("โปรดวางลิงก์ Google Sheet ที่ถูกต้อง"); return; }
+    if (!id) return alert("โปรดวางลิงก์ Google Sheet ที่ถูกต้อง");
     setSheetId(id);
     try {
       const data = await postJSON(`/api/sheets/tabs`, { sheetId: id });
       let tabs = [];
       if (Array.isArray(data.tabs)) tabs = data.tabs;
-      else if (Array.isArray(data.sheets)) tabs = data.sheets.map((s) => s && s.title).filter(Boolean);
+      else if (Array.isArray(data.sheets)) tabs = data.sheets.map((s) => s?.title).filter(Boolean);
       if (!tabs.length) throw new Error("ไม่พบรายชื่อชีต");
       setSheetTabs(tabs);
       setSheetName(tabs[0]);
       alert(`ซิงค์รายชื่อชีตสำเร็จ\nพบ ${tabs.length} แท็บ`);
-    } catch (err) {
-      console.error(err);
-      alert("ซิงค์รายชื่อชีตไม่สำเร็จโปรดตรวจสอบสิทธิ์การเข้าถึง/ตั้งค่า backend route: /api/sheets/tabs");
+    } catch (e) {
+      console.error(e);
+      alert("ซิงค์รายชื่อชีตไม่สำเร็จ โปรดตรวจสอบสิทธิ์และ backend /api/sheets/tabs");
     }
   }
 
   async function handlePreview() {
     const id = sheetId || extractSheetId(sheetLink);
-    if (!id) { alert("โปรดวางลิงก์หรือ ID ของ Google Sheet ให้ถูกต้อง"); return; }
+    if (!id) return alert("โปรดวางลิงก์หรือ ID ของ Google Sheet ให้ถูกต้อง");
     setSheetId(id);
     try {
       const data = await postJSON(`/api/sheets/preview`, { sheetId: id, range });
       setPreview(data);
-      if (data && Array.isArray(data.headers) && data.headers.length) {
-        const defaultCol = data.headers.indexOf("full_name") >= 0 ? "full_name" : data.headers[0];
-        setNameColumn(defaultCol);
+      const recs = Array.isArray(data?.rows) ? data.rows : Array.isArray(data?.sample) ? data.sample : [];
+      setRecords(recs || []);
+      setCurrentIndex(0);
+      setPage(0);
+      if (Array.isArray(data.headers) && data.headers.length) {
+        setNameColumn(data.headers.includes("full_name") ? "full_name" : data.headers[0]);
       }
-    } catch (err) {
-      console.error(err);
-      alert("ดึงข้อมูลตัวอย่างจากชีตไม่สำเร็จตรวจสอบสิทธิ์การเข้าถึงและช่วง Range");
+    } catch (e) {
+      console.error(e);
+      alert("ดึงข้อมูลตัวอย่างจากชีตไม่สำเร็จ");
     }
   }
 
-  async function handleGenerate() {
-    const id = sheetId || extractSheetId(sheetLink);
-    if (!id) { alert("กรุณาใส่ลิงก์ของ Google Sheet ให้ถูกต้อง"); return; }
-    if (!templateFile) { alert("กรุณาอัปโหลดเทมเพลต (ภาพหรือ PDF)"); return; }
-
+  // สร้าง FormData สำหรับทั้ง generate / preview
+  function buildGenerateForm(id) {
     const form = new FormData();
     form.append("template", templateFile);
     form.append("sheetId", id);
@@ -214,15 +233,15 @@ export default function CertificateAdmin() {
     form.append("nameColumn", nameColumn);
     form.append("outputFormat", outputFormat);
 
-    const effectiveMode =
-      mode === "auto" ? (templateFile.type === "application/pdf" ? "pdf" : "image") : mode;
+    const effectiveMode = mode === "auto" ? (templateFile?.type === "application/pdf" ? "pdf" : "image") : mode;
     form.append("mode", effectiveMode);
 
-    // position
+    // position (ใช้สัดส่วน)
     form.append("xRel", String(posRel.x));
     form.append("yRel", String(posRel.y));
     form.append("useRelative", "true");
     form.append("fromTop", "true");
+    form.append("pageIndex", String(pageIndex));
 
     // font & style
     form.append("fontFamily", effectiveCssFamily);
@@ -231,63 +250,94 @@ export default function CertificateAdmin() {
     if (selectedPreset.key === "Custom" && customFontFile) {
       form.append("fontFile", customFontFile, customFontFile.name);
     }
-
     form.append("fontSize", String(fontSize));
     form.append("color", color);
-    form.append("pageIndex", String(pageIndex));
     form.append("filenamePrefix", filenamePrefix);
+    return form;
+  }
 
+  async function handleGenerateZip() {
+    const id = sheetId || extractSheetId(sheetLink);
+    if (!id) return alert("กรุณาใส่ลิงก์ของ Google Sheet ให้ถูกต้อง");
+    if (!templateFile) return alert("กรุณาอัปโหลดเทมเพลต (ภาพหรือ PDF)");
     try {
+      const form = buildGenerateForm(id);
       const blob = await postForm(`/api/generate`, form, { response: "blob" });
-      const blobUrl = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      a.href = blobUrl;
-      a.download = `certificates_${Date.now()}.zip`;
-      a.click();
-      URL.revokeObjectURL(blobUrl);
-    } catch (err) {
-      console.error(err);
-      alert("สร้างไฟล์ไม่สำเร็จ ตรวจสอบรูปแบบและสิทธิ์ไฟล์อีกครั้ง");
+      a.href = url; a.download = `certificates_${Date.now()}.zip`; a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error(e);
+      alert("สร้าง ZIP ไม่สำเร็จ");
     }
   }
 
+  // ขอภาพพรีวิวจริงจาก backend (png)
+  async function requestServerPreview(idx) {
+    setSrvError("");
+    const id = sheetId || extractSheetId(sheetLink);
+    if (!id || !templateFile || idx < 0 || idx >= total) return;
+    setSrvLoading(true);
+    try {
+      const form = buildGenerateForm(id);
+      form.append("rowIndex", String(idx));
+      form.append("preview", "png");
+      const blob = await postForm(`/api/generate/preview`, form, { response: "blob" });
+      const url = URL.createObjectURL(blob);
+      // clear old blob url
+      setSrvUrl((old) => { if (old) URL.revokeObjectURL(old); return url; });
+    } catch (e) {
+      console.error(e);
+      setSrvError(typeof e?.message === "string" ? e.message : "Preview เรนเดอร์ไม่สำเร็จ");
+    } finally {
+      setSrvLoading(false);
+    }
+  }
+
+  // ดาวน์โหลดเฉพาะไฟล์ปัจจุบัน (จริง)
+  async function downloadCurrent() {
+    const id = sheetId || extractSheetId(sheetLink);
+    if (!id || !templateFile) return alert("กรุณาใส่ลิงก์ชีตและอัปโหลดเทมเพลตก่อน");
+    try {
+      const form = buildGenerateForm(id);
+      form.append("rowIndex", String(currentIndex));
+      const blob = await postForm(`/api/generate/one`, form, { response: "blob" });
+      const nm = getNameFromRow(records[currentIndex], preview, nameColumn) || `row-${currentIndex+1}`;
+      const ext = outputFormat === "pdf" ? "pdf" : "png";
+      const a = document.createElement("a");
+      const url = URL.createObjectURL(blob);
+      a.href = url; a.download = `${filenamePrefix}${safeSlug(nm)}.${ext}`; a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error(e);
+      alert("ดาวน์โหลดไฟล์ปัจจุบันไม่สำเร็จ");
+    }
+  }
+
+  // local template handlers
   function handleTemplateChange(e) {
-    const files = e?.target?.files || [];
-    const f = files[0] || null;
+    const f = e?.target?.files?.[0] || null;
     setTemplateFile(f);
+    setSrvUrl((old) => { if (old) URL.revokeObjectURL(old); return ""; });
     if (!f) { setPreviewUrl(""); setMode("auto"); return; }
-    if (f.type && f.type.startsWith("image/")) {
-      setPreviewUrl(URL.createObjectURL(f));
-      setMode("image");
-      setPosRel({ x: 0.5, y: 0.5 });
+    if (f.type?.startsWith("image/")) {
+      setPreviewUrl(URL.createObjectURL(f)); setMode("image"); setPosRel({ x: 0.5, y: 0.5 });
     } else if (f.type === "application/pdf") {
-      setPreviewUrl("");
-      setMode("pdf");
-      setPosRel({ x: 0.5, y: 0.5 });
-      renderPdfFirstPage(f);
-    } else {
-      setPreviewUrl("");
-      setMode("auto");
-    }
+      setPreviewUrl(""); setMode("pdf"); setPosRel({ x: 0.5, y: 0.5 }); renderPdfFirstPage(f);
+    } else { setPreviewUrl(""); setMode("auto"); }
   }
-
   async function renderPdfFirstPage(file) {
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-    const page = await pdf.getPage(pageIndex + 1); // pageIndex starts 0
+    const buf = await file.arrayBuffer();
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+    const page = await pdf.getPage(pageIndex + 1);
     const viewport = page.getViewport({ scale: 1.5 });
-    const canvas = pdfCanvasRef.current;
-    const ctx = canvas.getContext("2d");
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
+    const canvas = pdfCanvasRef.current; const ctx = canvas.getContext("2d");
+    canvas.width = viewport.width; canvas.height = viewport.height;
     await page.render({ canvasContext: ctx, viewport }).promise;
     setPdfSize({ width: viewport.width, height: viewport.height });
   }
-
-  useEffect(() => {
-    if (templateFile && mode === "pdf") renderPdfFirstPage(templateFile);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pageIndex]);
+  useEffect(() => { if (templateFile && mode === "pdf") renderPdfFirstPage(templateFile); }, [pageIndex]); // eslint-disable-line
 
   function onClickImage(e) {
     if (!imgRef.current) return;
@@ -303,26 +353,28 @@ export default function CertificateAdmin() {
     const y = (e.clientY - rect.top) / rect.height;
     setPosRel({ x: clamp01(x), y: clamp01(y) });
   }
+  // <<<<<< คลิกบนรูปจากแบ็กเอนด์เพื่อย้ายตำแหน่ง
+  function onClickServerImg(e) {
+    if (!srvImgRef.current) return;
+    const rect = srvImgRef.current.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    setPosRel({ x: clamp01(x), y: clamp01(y) });
+  }
 
   function handleCustomFontUpload(e) {
-    const files = e?.target?.files || [];
-    const f = files[0] || null;
+    const f = e?.target?.files?.[0] || null;
     setCustomFontFile(f);
     if (!f) { setCustomFontFamily(""); return; }
-    const family = `UserFont_${Date.now()}`;
-    const url = URL.createObjectURL(f);
-    const styleEl = document.createElement("style");
-    styleEl.setAttribute("data-userfont", family);
-    styleEl.innerHTML = `@font-face { font-family: '${family}'; src: url('${url}'); font-display: swap; }`;
+    const family = `UserFont_${Date.now()}`, url = URL.createObjectURL(f);
+    const styleEl = document.createElement("style"); styleEl.setAttribute("data-userfont", family);
+    styleEl.innerHTML = `@font-face{font-family:'${family}';src:url('${url}');font-display:swap}`;
     document.head.appendChild(styleEl);
     setCustomFontFamily(family);
   }
+  function resetMarkerCenter() { setPosRel({ x: 0.5, y: 0.5 }); }
 
-  function resetMarkerCenter() {
-    setPosRel({ x: 0.5, y: 0.5 });
-  }
-
-  // ---- preview scale: ให้ขนาดตัวอย่างสเกลตรงกับต้นฉบับจริง ----
+  // scale สำหรับ overlay local
   function usePreviewScale() {
     const [scale, setScale] = useState(1);
     useEffect(() => {
@@ -337,9 +389,7 @@ export default function CertificateAdmin() {
           const srcW = cv.width || 1;
           const dispW = cv.clientWidth || 1;
           setScale(dispW / srcW);
-        } else {
-          setScale(1);
-        }
+        } else setScale(1);
       }
       update();
       window.addEventListener("resize", update);
@@ -349,6 +399,23 @@ export default function CertificateAdmin() {
   }
   const previewScale = usePreviewScale();
 
+  // ===== derived for filenames & sample text =====
+  const currentRow = records[currentIndex] || null;
+  const sampleName = getNameFromRow(currentRow, preview, nameColumn) || "Firstname Lastname";
+  const ext = outputFormat === "pdf" ? "pdf" : "png";
+  const exampleFileName = `${filenamePrefix}${safeSlug(sampleName)}.${ext}`;
+
+  // ===== auto refresh server preview เมื่อปรับค่า =====
+  useDebouncedEffect(() => {
+    if (previewTab !== "server") return;
+    if (!records.length) return;
+    requestServerPreview(currentIndex);
+  }, [
+    previewTab, currentIndex, templateFile,
+    posRel.x, posRel.y, fontSize, color, fontPresetKey, customFontFile, customFontFamily,
+    fontWeight, letterSpacing, pageIndex, sheetId, range, nameColumn, outputFormat
+  ], 400);
+
   // ===== UI =====
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -356,9 +423,9 @@ export default function CertificateAdmin() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-800">Certificate</h1>
-          <p className="text-slate-500 text-sm">เลือกตำแหน่งจาก Preview แล้วระบบคำนวณ X/Y ให้อัตโนมัติ</p>
+          <p className="text-slate-500 text-sm">ปรับตำแหน่ง/ฟอนต์ แล้ว “ดูพรีวิวจากไฟล์จริง” ก่อนดาวน์โหลด</p>
         </div>
-        <button onClick={handleGenerate} className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-white font-medium shadow hover:bg-emerald-700">
+        <button onClick={handleGenerateZip} className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-white font-medium shadow hover:bg-emerald-700">
           Generate ZIP
         </button>
       </div>
@@ -366,44 +433,18 @@ export default function CertificateAdmin() {
       {/* Google Sheet */}
       <section className="rounded-xl border bg-white p-4 md:p-6 shadow-sm">
         <h2 className="font-semibold text-slate-800 mb-4">Google Sheet</h2>
-
         <div className="grid md:grid-cols-3 gap-4 items-end">
-          <FieldText
-            label="Sheet Link"
-            value={sheetLink}
-            onChange={onSheetLinkChange}
-            placeholder="วางลิงก์เช่น https://docs.google.com/spreadsheets/d/1AbC.../edit#gid=0"
-          />
+          <FieldText label="Sheet Link" value={sheetLink} onChange={onSheetLinkChange} placeholder="https://docs.google.com/spreadsheets/d/..." />
           <div className="md:col-span-1 flex items-end gap-2">
-            <button
-              type="button"
-              onClick={syncSheetTabs}
-              className="rounded-md bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-black"
-            >
+            <button type="button" onClick={syncSheetTabs} className="rounded-md bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-black">
               ซิงค์รายชื่อชีต
             </button>
           </div>
-
-          {/* sheet tab */}
           <div className="md:col-span-1">
             <label className="block text-sm text-slate-600 mb-1">ชื่อชีต (Sheet Tab)</label>
-            <select
-              className="w-full rounded-md border-slate-300 focus:border-emerald-500 focus:ring-emerald-500"
-              value={sheetName}
-              onChange={(e) => setSheetName(e.target.value)}
-              disabled={sheetTabs.length === 0}
-            >
-              {sheetTabs.length === 0 ? (
-                <option value="">— กด “ซิงค์รายชื่อชีต” ก่อน —</option>
-              ) : (
-                sheetTabs.map((t) => (
-                  <option key={t} value={t}>{t}</option>
-                ))
-              )}
+            <select className="w-full rounded-md border-slate-300 focus:border-emerald-500 focus:ring-emerald-500" value={sheetName} onChange={(e) => setSheetName(e.target.value)} disabled={sheetTabs.length === 0}>
+              {sheetTabs.length === 0 ? <option value="">— กด “ซิงค์รายชื่อชีต” ก่อน —</option> : sheetTabs.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
-            {sheetTabs.length === 0 && (
-              <p className="text-xs text-slate-500 mt-1">ต้องซิงค์รายชื่อชีตก่อนจึงจะเลือกแท็บได้</p>
-            )}
           </div>
         </div>
 
@@ -425,18 +466,14 @@ export default function CertificateAdmin() {
                 <option value="custom">กำหนดเอง</option>
               </select>
             </div>
-            {rowMode === "custom" && (
-              <FieldNumber label="แถวเริ่ม (Row Start)" value={rowStart} onChange={setRowStart} />
-            )}
-            {rowMode === "custom" && (
-              <FieldNumber label="แถวสุดท้าย (Row End)" value={rowEnd} onChange={setRowEnd} />
-            )}
+            {rowMode === "custom" && <FieldNumber label="แถวเริ่ม (Row Start)" value={rowStart} onChange={setRowStart} />}
+            {rowMode === "custom" && <FieldNumber label="แถวสุดท้าย (Row End)" value={rowEnd} onChange={setRowEnd} />}
           </div>
 
           {colMode === "custom" && (
             <div className="mt-2">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-sm text-slate-600">ติ๊กคอลัมน์ที่ต้องการ (ระบบจะใช้ช่วงครอบคลุมต่ำสุด–สูงสุด)</span>
+                <span className="text-sm text-slate-600">ติ๊กคอลัมน์ที่ต้องการ</span>
                 <div className="flex gap-2">
                   <button type="button" className="text-xs px-2 py-1 rounded border bg-white hover:bg-slate-100" onClick={() => setSelectedCols(COLS)}>ติ๊กทั้งหมด</button>
                   <button type="button" className="text-xs px-2 py-1 rounded border bg-white hover:bg-slate-100" onClick={() => setSelectedCols([])}>ล้างทั้งหมด</button>
@@ -445,138 +482,183 @@ export default function CertificateAdmin() {
               <div className="grid grid-cols-13 gap-2">
                 {COLS.map((c) => (
                   <label key={c} className="inline-flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      className="rounded"
-                      checked={selectedCols.indexOf(c) >= 0}
-                      onChange={(e) => {
-                        setSelectedCols((prev) => {
-                          if (e.target.checked) return Array.from(new Set(prev.concat(c)));
-                          return prev.filter((x) => x !== c);
-                        });
-                      }}
-                    />
+                    <input type="checkbox" className="rounded" checked={selectedCols.includes(c)}
+                      onChange={(e) => setSelectedCols((prev) => e.target.checked ? Array.from(new Set(prev.concat(c))) : prev.filter((x) => x !== c))} />
                     <span className="w-5 text-center font-mono">{c}</span>
                   </label>
                 ))}
               </div>
-              {selectedCols.length === 0 && (
-                <p className="text-xs text-amber-600 mt-2">ยังไม่ได้เลือกคอลัมน์ใด ๆ — ระบบจะใช้ A:Z ชั่วคราว</p>
-              )}
             </div>
           )}
         </div>
 
-        {/* Preview Sheet */}
         <div className="mt-4 flex items-center gap-2">
           <button onClick={handlePreview} className="rounded-md bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-black">Preview Sheet</button>
         </div>
 
         {preview && (
           <div className="mt-4 text-sm">
-            <div className="text-slate-600">
-              Headers: <span className="font-mono">{(preview.headers || []).join(", ")}</span>
-            </div>
+            <div className="text-slate-600">Headers: <span className="font-mono">{(preview.headers || []).join(", ")}</span></div>
             <div className="text-slate-600">Rows: {preview.count}</div>
-
-            <div className="self-end text-xs text-slate-500">
-              ถ้าไม่พบ header ที่ต้องการ ให้พิมพ์เองได้ใน Settings ด้านล่าง
-            </div>
-
             <ul className="mt-3 space-y-1 max-h-40 overflow-auto rounded border bg-slate-50 p-2">
               {(preview.sample || []).map((r, i) => (
-                <li key={i} className="font-mono text-xs bg-white rounded p-2 shadow-sm border">
-                  {JSON.stringify(r)}
-                </li>
+                <li key={i} className="font-mono text-xs bg-white rounded p-2 shadow-sm border">{JSON.stringify(r)}</li>
               ))}
             </ul>
           </div>
         )}
       </section>
 
+      {/* PREVIEW FILES: รายการทุกไฟล์ */}
+      {records.length > 0 && (
+        <section className="rounded-xl border bg-white p-4 md:p-6 shadow-sm">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-semibold text-slate-800">Preview Files</h2>
+            <div className="text-sm text-slate-600">กำลังดู: <span className="font-mono">{currentIndex + 1}</span> / {total}</div>
+          </div>
+
+          <div className="flex items-center gap-2 mb-3">
+            <button type="button" onClick={() => setCurrentIndex((i) => Math.max(0, i - 1))} className="rounded-md border bg-white px-3 py-1 text-sm hover:bg-slate-100 disabled:opacity-50" disabled={currentIndex === 0}>← Prev</button>
+            <button type="button" onClick={() => setCurrentIndex((i) => Math.min(total - 1, i + 1))} className="rounded-md border bg-white px-3 py-1 text-sm hover:bg-slate-100 disabled:opacity-50" disabled={currentIndex >= total - 1}>Next →</button>
+
+            <div className="ml-auto flex items-center gap-2 text-xs">
+              <span className="text-slate-500">ตัวอย่างไฟล์: <span className="font-mono">{exampleFileName}</span></span>
+              <button type="button" onClick={() => requestServerPreview(currentIndex)} className="rounded border px-2 py-1 hover:bg-slate-50">รีเฟรชพรีวิวจริง</button>
+              <button type="button" onClick={downloadCurrent} className="rounded border px-2 py-1 hover:bg-slate-50">ดาวน์โหลดไฟล์นี้</button>
+            </div>
+          </div>
+
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2 max-h-64 overflow-auto">
+            {records.slice(page * pageSize, Math.min(total, (page + 1) * pageSize)).map((row, i) => {
+              const realIndex = page * pageSize + i;
+              const nm = getNameFromRow(row, preview, nameColumn) || `row-${realIndex + 1}`;
+              const fname = `${filenamePrefix}${safeSlug(nm)}.${ext}`;
+              const active = realIndex === currentIndex;
+              return (
+                <button key={realIndex} type="button" onClick={() => setCurrentIndex(realIndex)}
+                  className={`text-left rounded border px-3 py-2 text-xs font-mono ${active ? "bg-emerald-600 text-white border-emerald-600" : "bg-white hover:bg-slate-50"}`} title={nm}>
+                  <div className="text-[11px] opacity-70">#{realIndex + 1}</div>
+                  <div className="truncate">{fname}</div>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="mt-3 flex items-center gap-2">
+            <button className={`px-3 py-1 rounded border text-sm ${previewTab === "server" ? "bg-emerald-600 text-white border-emerald-600" : "bg-white hover:bg-slate-50"}`} onClick={() => setPreviewTab("server")}>พรีวิวจริง (จากแบ็กเอนด์)</button>
+            <button className={`px-3 py-1 rounded border text-sm ${previewTab === "client" ? "bg-slate-800 text-white border-slate-800" : "bg-white hover:bg-slate-50"}`} onClick={() => setPreviewTab("client")}>พรีวิวเร็ว (ทับข้อความในเบราว์เซอร์)</button>
+          </div>
+        </section>
+      )}
+
       {/* Template + Preview */}
       <section className="rounded-xl border bg-white p-4 md:p-6 shadow-sm">
         <div className="flex items-center justify-between mb-4">
           <h2 className="font-semibold text-slate-800">Template</h2>
-          <div className="text-xs text-slate-500">โหมด: <span className="font-medium">{mode}</span></div>
+          <div className="text-xs text-slate-500">โหมดไฟล์: <span className="font-medium">{mode}</span></div>
         </div>
-        <input
-          type="file"
-          accept="image/*,application/pdf"
-          onChange={handleTemplateChange}
-          className="block w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-white file:font-medium hover:file:bg-black"
-        />
+        <input type="file" accept="image/*,application/pdf" onChange={handleTemplateChange}
+          className="block w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-white file:font-medium hover:file:bg-black" />
 
-        {mode === "image" && previewUrl && (
+        {/* SERVER RENDER PREVIEW */}
+        {previewTab === "server" && (
           <div className="mt-4 rounded-lg border bg-slate-50 p-3 overflow-auto relative">
-            <div className="relative inline-block">
-              <img
-                ref={imgRef}
-                src={previewUrl}
-                alt="template"
-                className="max-w-full h-auto rounded shadow cursor-crosshair select-none"
-                onClick={onClickImage}
-                onLoad={(e) => {
-                  const im = e.currentTarget;
-                  setImgNatural({ width: im.naturalWidth || 1, height: im.naturalHeight || 1 });
-                }}
-              />
-              <MarkerOverlay
-                parentRef={imgRef}
-                posRel={posRel}
-                onDrag={(nr) => setPosRel(nr)}
-                sampleText="Firstname Lastname"
-                color={color}
-                fontSize={fontSize}
-                fontFamily={effectiveCssFamily}
-                fontWeight={fontWeight}
-                letterSpacing={letterSpacing}
-                scale={previewScale}
-              />
-            </div>
-          </div>
-        )}
-
-        {mode === "pdf" && (
-          <div className="mt-4 space-y-3">
-            <div className="flex items-center gap-3">
-              <label className="text-sm text-slate-600">Page Index</label>
-              <input
-                type="number"
-                min={0}
-                value={pageIndex}
-                onChange={(e) => setPageIndex(+e.target.value)}
-                className="w-24 rounded-md border-slate-300 focus:border-emerald-500 focus:ring-emerald-500"
-              />
-              <button type="button" onClick={resetMarkerCenter} className="text-xs px-3 py-1 rounded border bg-white hover:bg-slate-100">
-                รีเซ็ตตำแหน่งตัวอย่าง
-              </button>
-            </div>
-            <div className="rounded-lg border bg-slate-50 p-3 overflow-auto relative">
+            {srvLoading && <div className="p-6 text-center text-slate-500 text-sm">กำลังเรนเดอร์พรีวิวจากเซิร์ฟเวอร์…</div>}
+            {srvError && <div className="p-3 text-sm text-red-600 border border-red-200 bg-red-50 rounded">{srvError}</div>}
+            {!srvLoading && !srvError && srvUrl && (
               <div className="relative inline-block">
-                <canvas
-                  ref={pdfCanvasRef}
-                  className="rounded shadow cursor-crosshair select-none"
-                  onClick={onClickPdf}
+                <img
+                  ref={srvImgRef}
+                  src={srvUrl}
+                  alt="server-preview"
+                  className="max-w-full h-auto rounded shadow cursor-crosshair select-none"
+                  onClick={onClickServerImg}
                 />
+                {/* ตัวจับ/เส้นไกด์ทับบนพรีวิวจาก backend (ไม่โชว์ข้อความทับ) */}
                 <MarkerOverlay
-                  parentRef={pdfCanvasRef}
+                  parentRef={srvImgRef}
                   posRel={posRel}
                   onDrag={(nr) => setPosRel(nr)}
-                  sampleText="ชื่อ-นามสกุล"
-                  color={color}
+                  sampleText=""
+                  color="transparent"
                   fontSize={fontSize}
                   fontFamily={effectiveCssFamily}
                   fontWeight={fontWeight}
                   letterSpacing={letterSpacing}
-                  scale={previewScale}
+                  scale={1}
+                  showText={false}
                 />
               </div>
-            </div>
-            <p className="text-xs text-slate-500">
-              พิกัดที่เลือกเป็นสัดส่วน (0..1) เทียบกับขนาดหน้า PDF — Backend จะคำนวณพิกัดจริงให้อัตโนมัติ
-            </p>
+            )}
+            {!srvLoading && !srvError && !srvUrl && <div className="p-6 text-center text-slate-400 text-sm">ยังไม่มีพรีวิว — กด “รีเฟรชพรีวิวจริง” หรือปรับค่าเพื่อให้เรนเดอร์อัตโนมัติ</div>}
           </div>
+        )}
+
+        {/* CLIENT OVERLAY PREVIEW (เร็ว) */}
+        {previewTab === "client" && (
+          <>
+            {mode === "image" && previewUrl && (
+              <div className="mt-4 rounded-lg border bg-slate-50 p-3 overflow-auto relative">
+                <div className="relative inline-block">
+                  <img
+                    ref={imgRef}
+                    src={previewUrl}
+                    alt="template"
+                    className="max-w-full h-auto rounded shadow cursor-crosshair select-none"
+                    onClick={onClickImage}
+                    onLoad={(e) => {
+                      const im = e.currentTarget;
+                      setImgNatural({ width: im.naturalWidth || 1, height: im.naturalHeight || 1 });
+                    }}
+                  />
+                  <MarkerOverlay
+                    parentRef={imgRef}
+                    posRel={posRel}
+                    onDrag={(nr) => setPosRel(nr)}
+                    sampleText={sampleName}
+                    color={color}
+                    fontSize={fontSize}
+                    fontFamily={effectiveCssFamily}
+                    fontWeight={fontWeight}
+                    letterSpacing={letterSpacing}
+                    scale={previewScale}
+                    showText={true}
+                  />
+                </div>
+              </div>
+            )}
+            {mode === "pdf" && (
+              <div className="mt-4 space-y-3">
+                <div className="flex items-center gap-3">
+                  <label className="text-sm text-slate-600">Page Index</label>
+                  <input type="number" min={0} value={pageIndex} onChange={(e) => setPageIndex(+e.target.value)}
+                    className="w-24 rounded-md border-slate-300 focus:border-emerald-500 focus:ring-emerald-500" />
+                  <button type="button" onClick={resetMarkerCenter} className="text-xs px-3 py-1 rounded border bg-white hover:bg-slate-100">
+                    รีเซ็ตตำแหน่งตัวอย่าง
+                  </button>
+                </div>
+                <div className="rounded-lg border bg-slate-50 p-3 overflow-auto relative">
+                  <div className="relative inline-block">
+                    <canvas ref={pdfCanvasRef} className="rounded shadow cursor-crosshair select-none" onClick={onClickPdf} />
+                    <MarkerOverlay
+                      parentRef={pdfCanvasRef}
+                      posRel={posRel}
+                      onDrag={(nr) => setPosRel(nr)}
+                      sampleText={sampleName}
+                      color={color}
+                      fontSize={fontSize}
+                      fontFamily={effectiveCssFamily}
+                      fontWeight={fontWeight}
+                      letterSpacing={letterSpacing}
+                      scale={previewScale}
+                      showText={true}
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-slate-500">ตำแหน่งเป็นสัดส่วน (0..1) — ใช้ค่านี้กับแบ็กเอนด์เหมือนกัน</p>
+              </div>
+            )}
+          </>
         )}
       </section>
 
@@ -587,7 +669,7 @@ export default function CertificateAdmin() {
           <FieldText label="Prefix ชื่อไฟล์" value={filenamePrefix} onChange={setFilenamePrefix} placeholder="CERT_" />
           <div>
             <label className="block text-sm text-slate-600 mb-1">เอาต์พุต</label>
-            <select className="w-full rounded-md border-slate-300 focus:border-emerald-500 focus:ring-emerald-500" value={outputFormat} onChange={(e) => setOutputFormat(e.target.value)}>
+            <select className="w-full rounded-md border-slate-300 focus:border-emerald-500 focus:ring-emerald-500" value={outputFormat} onChange={(e) => e.target.value && setOutputFormat(e.target.value)}>
               <option value="pdf">PDF</option>
               <option value="png">PNG</option>
             </select>
@@ -604,28 +686,20 @@ export default function CertificateAdmin() {
           </div>
         </div>
 
-        {/* Font Picker */}
         <div className="mt-6 rounded-lg border p-4 bg-slate-50">
           <h3 className="font-medium text-slate-800 mb-3">Font สำหรับชื่อ</h3>
           <div className="grid md:grid-cols-3 gap-4">
             <div>
               <label className="block text-sm text-slate-600 mb-1">Family</label>
               <select className="w-full rounded-md border-slate-300 focus:border-emerald-500 focus:ring-emerald-500" value={fontPresetKey} onChange={(e) => setFontPresetKey(e.target.value)}>
-                {FONT_PRESETS.map((f) => (
-                  <option key={f.key} value={f.key}>{f.label}</option>
-                ))}
+                {FONT_PRESETS.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
               </select>
             </div>
             <FieldNumber label="Weight (100-900)" value={fontWeight} onChange={setFontWeight} />
             <div>
               <label className="block text-sm text-slate-600 mb-1">Letter Spacing (px)</label>
-              <input
-                type="number"
-                step="0.5"
-                value={letterSpacing}
-                onChange={(e) => setLetterSpacing(parseFloat(e.target.value || 0))}
-                className="w-full rounded-md border-slate-300 focus:border-emerald-500 focus:ring-emerald-500"
-              />
+              <input type="number" step="0.5" value={letterSpacing} onChange={(e) => setLetterSpacing(parseFloat(e.target.value || 0))}
+                className="w-full rounded-md border-slate-300 focus:border-emerald-500 focus:ring-emerald-500" />
             </div>
           </div>
 
@@ -636,7 +710,7 @@ export default function CertificateAdmin() {
                 <input type="file" accept=".ttf,.otf,.woff,.woff2" onChange={handleCustomFontUpload} className="block w-full text-sm" />
                 {!customFontFile && <p className="text-xs text-amber-600 mt-1">อัปโหลดไฟล์ฟอนต์เพื่อใช้ในการพรีวิวและส่งให้ Backend</p>}
               </div>
-              <div className="self-end text-xs text-slate-500">ปล. จำเป็นต้องให้ฝั่ง Backend รองรับการฝังฟอนต์เมื่อเรนเดอร์ PDF</div>
+              <div className="self-end text-xs text-slate-500">* ฝั่ง Backend ต้องฝังฟอนต์ตอนเรนเดอร์</div>
             </div>
           )}
         </div>
@@ -675,7 +749,8 @@ function FieldNumber({ label, value, onChange }) {
   );
 }
 
-/** Draggable overlay (scaled preview) */
+/** Draggable overlay (ใช้ได้ทั้ง client preview และ server preview)
+ *  showText=false = แสดงเฉพาะเส้นไกด์ + จุดจับ (ไม่ทับข้อความจริงจาก backend) */
 function MarkerOverlay({
   parentRef,
   posRel,
@@ -686,7 +761,8 @@ function MarkerOverlay({
   fontFamily,
   fontWeight,
   letterSpacing,
-  scale = 1, // สเกลของพรีวิวบนจอ
+  scale = 1,
+  showText = true,
 }) {
   const markerRef = useRef(null);
 
@@ -749,9 +825,9 @@ function MarkerOverlay({
     left: `${posRel.x * 100}%`,
     top: `${posRel.y * 100}%`,
     transform: `translate(-50%, -50%)`,
-    fontFamily: fontFamily,
-    fontWeight: fontWeight,
-    letterSpacing: `${letterSpacing * scale}px`, // scale letterSpacing
+    fontFamily,
+    fontWeight,
+    letterSpacing: `${letterSpacing * scale}px`,
   };
 
   return (
@@ -775,19 +851,14 @@ function MarkerOverlay({
         style={style}
         title="ลากหรือใช้ปุ่มลูกศรเพื่อย้าย (Shift=10px, Alt=0.5px)"
       >
-        {/* ตัวหนังสือล้วน (สเกลเท่าจริง) */}
-        <div
-          className="rounded text-xs px-2 py-1"
-          style={{
-            color: color,
-            background: "transparent",
-            fontSize: `${Math.max(1, fontSize * scale)}px`, // scale font size
-          }}
-        >
-          {sampleText}
-        </div>
-
-        {/* จุดจับตำแหน่ง (ไม่ต้องสเกล เพื่อมองเห็นง่าย) */}
+        {showText && (
+          <div
+            className="rounded text-xs px-2 py-1"
+            style={{ color, background: "transparent", fontSize: `${Math.max(1, fontSize * scale)}px` }}
+          >
+            {sampleText}
+          </div>
+        )}
         <div className="mx-auto mt-1 h-2 w-2 rounded-full bg-emerald-500" />
       </div>
     </>
